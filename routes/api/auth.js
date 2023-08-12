@@ -1,6 +1,6 @@
 const express = require("express");
 const { sсhemas } = require("../../models/user");
-const { HttpError } = require("../../helpers");
+const { HttpError, sendEmail, createVerifyEmail } = require("../../helpers");
 const { User } = require("../../models/user");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -9,6 +9,7 @@ const gravatar = require("gravatar");
 const path = require("path");
 const fs = require("fs/promises");
 const Jimp = require("jimp");
+const { nanoid } = require("nanoid");
 
 const { SECRET_KEY } = process.env;
 
@@ -25,6 +26,7 @@ router.post("/register", async (req, res, next) => {
     }
     const { email, password } = req.body;
     const user = await User.findOne({ email });
+
     if (user) {
       throw HttpError(409, "Email already in use");
     }
@@ -32,15 +34,72 @@ router.post("/register", async (req, res, next) => {
     const hashPassword = await bcrypt.hash(password, 10);
     const avatarURL = gravatar.url(email);
 
+    const verificationToken = nanoid();
+
     const newUser = await User.create({
       ...req.body,
       password: hashPassword,
       avatarURL,
+      verificationToken,
     });
+
+    const verifyEmail = createVerifyEmail({ email, verificationToken });
+
+    await sendEmail(verifyEmail);
 
     res.status(201).json({
       email: newUser.email,
       password: newUser.password,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/verify/:verificationToken", async (req, res, next) => {
+  try {
+    const { verificationToken } = req.params;
+    const user = await User.findOne({ verificationToken });
+    if (!user) {
+      throw HttpError(404, "Email not found");
+    }
+    await User.findByIdAndUpdate(user._id, {
+      verify: true,
+      verificationToken: "",
+    });
+    res.json({
+      message: "Verify success",
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/verify", async (req, res, next) => {
+  try {
+    const { error } = sсhemas.userEmailSchema.validate(req.body);
+
+    if (error) {
+      throw HttpError(400, "missing required name field");
+    }
+
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) {
+      throw HttpError(404, "Email not found");
+    }
+    if (user.verify) {
+      throw HttpError(400, "Email already verify");
+    }
+
+    const verifyEmail = createVerifyEmail({
+      email,
+      verificationToken: user.verificationToken,
+    });
+
+    await sendEmail(verifyEmail);
+    res.json({
+      massage: "Resend email success",
     });
   } catch (error) {
     next(error);
@@ -59,6 +118,11 @@ router.post("/login", async (req, res, next) => {
     if (!user) {
       throw HttpError(401, "Email or password invalid");
     }
+
+    if (!user.verify) {
+      throw HttpError(401, "Email not verify");
+    }
+
     const passwordCompare = await bcrypt.compare(password, user.password);
     if (!passwordCompare) {
       throw HttpError(401, "Email or password invalid");
